@@ -5,7 +5,7 @@
 
 const APP_NAME = "Bluff Card Game";
 const MIN_PLAYERS = 2;
-const MAX_PLAYERS = 4;
+const MAX_PLAYERS = 6;
 const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
 const SUITS = ["S", "H", "D", "C"];
 const SUIT_SYMBOLS = {
@@ -364,7 +364,7 @@ function renderHome() {
     <section class="screen hero">
       <div class="brand-card">
         <div class="logo-mark">♠</div>
-        <span class="badge">2 to 4 Players</span>
+        <span class="badge">2 to 6 Players</span>
         <h1>${APP_NAME}</h1>
         <p>Create a room, invite friends, play cards face-down, and call Bluff when someone is lying.</p>
         <div class="home-grid">
@@ -420,7 +420,7 @@ function renderHowToPlay() {
       <div class="panel">
         <h2>Bluff Rules</h2>
         <ul class="rules-list">
-          <li>2 to 4 players can play in one online room.</li>
+          <li>2 to 6 players can play in one online room.</li>
           <li>Every player gets cards from a shuffled 52-card deck.</li>
           <li>On your turn, select one or more cards and claim a rank like “2 Kings”.</li>
           <li>After a set starts, the next players must continue the same claimed rank or press <strong>Pass</strong>.</li>
@@ -812,7 +812,7 @@ function renderGame(room) {
   const roundRank = room.roundRank || lastMove?.claimedRank || null;
   const passes = Array.isArray(room.passes) ? room.passes : [];
   const bluffAllowed = Boolean(isMyTurn && lastMove && lastMove.playerId !== currentUser.uid && pile.length > 0);
-  const passAllowed = Boolean(isMyTurn && lastMove && lastMove.playerId !== currentUser.uid && pile.length > 0);
+  const passAllowed = Boolean(isMyTurn && lastMove && pile.length > 0);
   const playButtonLabel = roundRank ? `Play ${getRankName(roundRank, 2)} Set` : "Play Selected Cards";
 
   appEl.innerHTML = `
@@ -833,16 +833,17 @@ function renderGame(room) {
 
         <div class="game-center">
           <div class="pile-zone">
+            ${pile.length ? `<div class="pile-count-tag">${pile.length} card${pile.length === 1 ? "" : "s"}</div>` : ""}
             <div class="pile-cards">
               ${renderPileCards(pile.length)}
             </div>
             <div class="last-claim">
               ${lastMove ? `${escapeHTML(lastMove.playerName || "Player")} claimed ${lastMove.claimedCount} ${escapeHTML(getRankName(lastMove.claimedRank, lastMove.claimedCount))}` : "No claim yet"}
-              <small>${roundRank ? `Current set: ${escapeHTML(getRankName(roundRank, 2))}` : "Start any rank"} · ${pile.length} card${pile.length === 1 ? "" : "s"} in pile</small>
+              <small>${roundRank ? `Current set: ${escapeHTML(getRankName(roundRank, 2))}` : "Start any rank"}</small>
               ${passes.length ? `<small>${passes.length} pass${passes.length === 1 ? "" : "es"} after last play</small>` : ""}
             </div>
             <div class="btn-row" style="margin-top: 14px; justify-content: center;">
-              ${bluffAllowed ? `<button class="btn danger" data-action="call-bluff">Call Bluff</button>` : ""}
+              ${bluffAllowed ? `<button class="btn danger" data-action="call-bluff">⚑ Call Bluff</button>` : ""}
               ${passAllowed ? `<button class="btn secondary" data-action="pass-turn">Pass</button>` : ""}
             </div>
           </div>
@@ -929,9 +930,10 @@ function renderCard(card, options = {}) {
   const selected = options.selected ? "selected" : "";
   const selectable = options.selectable ? "tap-card" : "";
   const data = options.selectable ? `data-card="${escapeHTML(card)}" data-card-index="${Number(options.index || 0)}"` : "";
+  const style = options.flipDelay !== undefined ? `style="--i:${Number(options.flipDelay)};"` : "";
 
   return `
-    <div class="card ${red ? "red" : ""} ${selected} ${selectable}" ${data} role="button" aria-label="${escapeHTML(card)}">
+    <div class="card ${red ? "red" : ""} ${selected} ${selectable}" ${data} ${style} role="button" aria-label="${escapeHTML(card)}">
       <div class="corner top-left"><span>${escapeHTML(rank)}</span><span class="suit-small">${symbol}</span></div>
       <div class="center-suit">${symbol}</div>
       <div class="corner bottom-right"><span>${escapeHTML(rank)}</span><span class="suit-small">${symbol}</span></div>
@@ -1090,7 +1092,7 @@ async function passTurn() {
       return;
     }
 
-    if (!lastMove || lastMove.playerId === uid || !(room.pile || []).length) {
+    if (!lastMove || !(room.pile || []).length) {
       showToast("You can pass only after someone has played cards");
       return;
     }
@@ -1099,8 +1101,13 @@ async function passTurn() {
     const passes = oldPasses.includes(uid) ? oldPasses : [...oldPasses, uid];
     const firstPassAfterLastMove = room.firstPassAfterLastMove || uid;
     const nextIndex = getNextPlayerIndex(turnOrder, currentTurnIndex);
-    const nextPlayerId = turnOrder[nextIndex];
-    const roundShouldClear = nextPlayerId === lastMove.playerId || passes.filter((id) => id !== lastMove.playerId).length >= Math.max(0, turnOrder.length - 1);
+
+    // Round clears only when the player who made the last move has ALREADY
+    // had their turn back (i.e. they are the one passing right now) and
+    // chose to pass instead of adding more cards. We must never clear the
+    // pile by skipping their turn — they always get a chance to extend
+    // their own set or pass it themselves.
+    const roundShouldClear = uid === lastMove.playerId;
 
     const updatedRoom = {
       ...room,
@@ -1112,13 +1119,12 @@ async function passTurn() {
     selectedCards = [];
 
     if (roundShouldClear) {
-      const firstPassIndex = Math.max(0, turnOrder.indexOf(firstPassAfterLastMove));
       updatedRoom.pile = [];
       updatedRoom.lastMove = null;
       updatedRoom.roundRank = null;
       updatedRoom.passes = [];
       updatedRoom.firstPassAfterLastMove = null;
-      updatedRoom.currentTurnIndex = firstPassIndex >= 0 ? firstPassIndex : nextIndex;
+      updatedRoom.currentTurnIndex = nextIndex;
       updatedRoom.roundMessage = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         message: "Everyone passed. The center pile was cleared. Start a new set.",
@@ -1243,10 +1249,13 @@ function showResultIfNeeded(room) {
   if (!result || !result.id || result.id === lastShownResultId) return;
   lastShownResultId = result.id;
 
-  const cards = (result.revealedCards || []).map((card) => renderCard(card)).join("");
-  const title = result.wasBluff ? "Bluff Caught" : "Honest Move";
+  const cards = (result.revealedCards || []).map((card, i) => renderCard(card, { flipDelay: i })).join("");
+  const isCaught = Boolean(result.wasBluff);
+  const stampClass = isCaught ? "caught" : "honest";
+  const stampLabel = isCaught ? "Bluff Caught" : "Honest Move";
 
-  showModal(title, `
+  showModal(stampLabel, `
+    <div class="result-stamp ${stampClass}">${isCaught ? "✕ " : "✓ "}${stampLabel}</div>
     <p><strong>${escapeHTML(result.callerName || "Player")}</strong> called Bluff on <strong>${escapeHTML(result.playerName || "Player")}</strong>.</p>
     <p>Claimed: <strong>${Number(result.claimedCount || 0)} ${escapeHTML(getRankName(result.claimedRank, result.claimedCount || 0))}</strong></p>
     <div class="revealed-cards">${cards}</div>
@@ -1254,6 +1263,9 @@ function showResultIfNeeded(room) {
   `, `
     <button class="btn" data-action="close-modal">Continue</button>
   `);
+
+  const modalCard = modalRoot.querySelector(".modal-card");
+  if (modalCard) modalCard.classList.add("bluff-result", isCaught ? "caught" : "honest");
 }
 
 function showRoundMessageIfNeeded(room) {
