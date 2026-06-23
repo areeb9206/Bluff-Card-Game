@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f3f2e" />
+  <meta name="description" content="A realtime online multiplayer Bluff card game for 2 to 4 players." />
+  <title>Bluff Card Game</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app" class="app" aria-live="polite">
+    <section class="screen center-screen">
+      <div class="brand-card loading-card">
+        <div class="logo-mark">♠</div>
+        <h1>Bluff Card Game</h1>
+        <p>Loading table...</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="modalRoot" class="modal-root" aria-hidden="true"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Firebase compat SDK works without build tools -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.4/firebase-database-compat.js"></script>
+
+  <script src="firebase-config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
