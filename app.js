@@ -24,6 +24,25 @@ const RANK_NAMES = {
   K: ["King", "Kings"]
 };
 
+const AVATARS = [
+  "🦁", "🐯", "🐺", "🦊", "🐻", "🐼",
+  "🐸", "🐵", "🦉", "🦅", "🐲", "🦄",
+  "🐙", "🦂", "🐍", "🦈", "🐳", "🦋",
+  "🃏", "🎩", "🕶️", "👑", "🥷", "🧙"
+];
+const DEFAULT_AVATAR = "🃏";
+
+const AVATAR_RING_COLORS = [
+  "#e8c772", "#ff7a6b", "#57d98c", "#6bb7ff", "#d693ff", "#ffb26b"
+];
+
+function avatarRingColor(seed) {
+  const str = String(seed || "");
+  let hash = 0;
+  for (let i = 0; i < str.length; i += 1) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
+  return AVATAR_RING_COLORS[hash % AVATAR_RING_COLORS.length];
+}
+
 const appEl = document.getElementById("app");
 const modalRoot = document.getElementById("modalRoot");
 const toastEl = document.getElementById("toast");
@@ -33,6 +52,7 @@ let db = null;
 let currentUser = null;
 let userProfile = null;
 let playerName = localStorage.getItem("bluffPlayerName") || "";
+let playerAvatar = localStorage.getItem("bluffPlayerAvatar") || DEFAULT_AVATAR;
 let authMode = "login";
 let currentScreen = "loading";
 let currentRoomCode = localStorage.getItem("bluffCurrentRoom") || "";
@@ -43,6 +63,8 @@ let selectedCards = [];
 let isBusy = false;
 let lastShownResultId = "";
 let lastShownRoundMessageId = "";
+const countedBluffResultIds = new Set();
+const countedFinishedRooms = new Set();
 let toastTimer = null;
 let dealAnimationRoomCode = "";
 let dealAnimationTimer = null;
@@ -150,13 +172,25 @@ async function loadCurrentUserProfile() {
   const savedName = userProfile?.username || currentUser.displayName || localStorage.getItem("bluffPlayerName") || "";
   playerName = String(savedName || "").trim().slice(0, 18);
 
+  const savedAvatar = userProfile?.avatar || localStorage.getItem("bluffPlayerAvatar") || DEFAULT_AVATAR;
+  playerAvatar = AVATARS.includes(savedAvatar) ? savedAvatar : DEFAULT_AVATAR;
+
   if (playerName) {
     localStorage.setItem("bluffPlayerName", playerName);
   }
+  localStorage.setItem("bluffPlayerAvatar", playerAvatar);
 
   if (!userProfile && playerName) {
     await saveUserProfile(playerName).catch(() => {});
   }
+}
+
+function emptyStats() {
+  return { gamesPlayed: 0, gamesWon: 0, bluffsCaught: 0, bluffsLanded: 0, bluffsBackfired: 0 };
+}
+
+function getPlayerStats() {
+  return { ...emptyStats(), ...(userProfile?.stats || {}) };
 }
 
 async function saveUserProfile(username) {
@@ -170,8 +204,11 @@ async function saveUserProfile(username) {
   await currentUser.updateProfile({ displayName: cleanName }).catch(() => {});
   await db.ref(`users/${currentUser.uid}`).update({
     username: cleanName,
+    avatar: playerAvatar,
     email: currentUser.email || "",
+    isGuest: Boolean(currentUser.isAnonymous),
     uid: currentUser.uid,
+    stats: userProfile?.stats || emptyStats(),
     updatedAt: firebase.database.ServerValue.TIMESTAMP,
     createdAt: userProfile?.createdAt || firebase.database.ServerValue.TIMESTAMP
   });
@@ -179,9 +216,66 @@ async function saveUserProfile(username) {
   userProfile = {
     ...(userProfile || {}),
     username: cleanName,
+    avatar: playerAvatar,
     email: currentUser.email || "",
-    uid: currentUser.uid
+    isGuest: Boolean(currentUser.isAnonymous),
+    uid: currentUser.uid,
+    stats: userProfile?.stats || emptyStats()
   };
+}
+
+async function saveUserAvatar(avatar) {
+  if (!currentUser || !db) return;
+  const clean = AVATARS.includes(avatar) ? avatar : DEFAULT_AVATAR;
+  playerAvatar = clean;
+  localStorage.setItem("bluffPlayerAvatar", clean);
+  await db.ref(`users/${currentUser.uid}/avatar`).set(clean);
+  userProfile = { ...(userProfile || {}), avatar: clean };
+
+  if (currentRoomCode && db) {
+    await db.ref(`rooms/${currentRoomCode}/players/${currentUser.uid}/avatar`).set(clean).catch(() => {});
+  }
+}
+
+async function recordGameStats({ countGame = false, won = false, bluffsCaught = 0, bluffsLanded = 0, bluffsBackfired = 0 }) {
+  if (!currentUser || !db) return;
+  try {
+    await db.ref(`users/${currentUser.uid}/stats`).transaction((stats) => {
+      const base = stats || emptyStats();
+      return {
+        gamesPlayed: (base.gamesPlayed || 0) + (countGame ? 1 : 0),
+        gamesWon: (base.gamesWon || 0) + (won ? 1 : 0),
+        bluffsCaught: (base.bluffsCaught || 0) + bluffsCaught,
+        bluffsLanded: (base.bluffsLanded || 0) + bluffsLanded,
+        bluffsBackfired: (base.bluffsBackfired || 0) + bluffsBackfired
+      };
+    });
+    const snap = await db.ref(`users/${currentUser.uid}/stats`).once("value");
+    if (userProfile) userProfile.stats = snap.val() || emptyStats();
+  } catch (error) {
+    console.error("Could not record stats", error);
+  }
+}
+
+async function loginAsGuest(name) {
+  if (!auth || !db || isBusy) return;
+  const cleanName = String(name || "").trim().slice(0, 18);
+  if (!cleanName) return showToast("Enter a display name to continue as guest");
+
+  setBusy(true);
+  try {
+    const credential = await auth.signInAnonymously();
+    currentUser = credential.user;
+    playerName = cleanName;
+    playerAvatar = playerAvatar || DEFAULT_AVATAR;
+    await saveUserProfile(cleanName);
+    showToast(`Welcome, ${cleanName}`);
+    navigate("home", false);
+  } catch (error) {
+    showToast(formatAuthError(error));
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function signUpWithEmail(username, email, password) {
@@ -216,6 +310,28 @@ async function loginWithEmail(email, password) {
   try {
     await auth.signInWithEmailAndPassword(cleanEmail, password);
     showToast("Logged in");
+  } catch (error) {
+    showToast(formatAuthError(error));
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function upgradeGuestAccount(email, password) {
+  if (!auth || !currentUser || isBusy) return;
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  if (!cleanEmail) return showToast("Enter email");
+  if (String(password || "").length < 6) return showToast("Password must be at least 6 characters");
+
+  setBusy(true);
+  try {
+    const credential = firebase.auth.EmailAuthProvider.credential(cleanEmail, password);
+    await currentUser.linkWithCredential(credential);
+    await db.ref(`users/${currentUser.uid}`).update({ email: cleanEmail, isGuest: false });
+    userProfile = { ...(userProfile || {}), email: cleanEmail, isGuest: false };
+    closeModal();
+    showToast("Account saved. You can now log in with this email anytime.");
+    renderCurrentScreen();
   } catch (error) {
     showToast(formatAuthError(error));
   } finally {
@@ -269,11 +385,11 @@ async function sendPasswordReset() {
 
 function formatAuthError(error) {
   const code = error?.code || "";
-  if (code.includes("email-already-in-use")) return "This email is already registered";
+  if (code.includes("email-already-in-use") || code.includes("credential-already-in-use")) return "This email is already registered. Try logging in instead.";
   if (code.includes("invalid-email")) return "Invalid email address";
   if (code.includes("weak-password")) return "Password is too weak";
   if (code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential")) return "Wrong email or password";
-  if (code.includes("operation-not-allowed")) return "Enable Email/Password Authentication in Firebase";
+  if (code.includes("operation-not-allowed")) return "Enable Email/Password and Anonymous Authentication in Firebase";
   return error?.message || "Authentication failed";
 }
 
@@ -307,6 +423,7 @@ function renderCurrentScreen() {
   if (currentScreen === "auth") renderAuthScreen();
   else if (currentScreen === "name") renderNameScreen();
   else if (currentScreen === "home") renderHome();
+  else if (currentScreen === "profile") renderProfile();
   else if (currentScreen === "join") renderJoinRoom();
   else if (currentScreen === "how") renderHowToPlay();
   else renderLoading();
@@ -314,27 +431,44 @@ function renderCurrentScreen() {
 
 function renderAuthScreen() {
   const isSignup = authMode === "signup";
+  const isGuest = authMode === "guest";
+
+  let formHTML = "";
+  if (isGuest) {
+    formHTML = `
+      <form id="guestForm" class="form">
+        <input class="input" id="guestName" maxlength="18" autocomplete="name" placeholder="Pick a display name" value="${escapeHTML(playerName)}" required />
+        <button class="btn" type="submit">Play as Guest</button>
+      </form>
+      <p style="margin: 16px 0 0;">No email needed. You can save your profile permanently later from your profile page.</p>
+    `;
+  } else {
+    formHTML = `
+      <form id="${isSignup ? "signupForm" : "loginForm"}" class="form">
+        ${isSignup ? `<input class="input" id="signupUsername" maxlength="18" autocomplete="name" placeholder="Username" required />` : ""}
+        <input class="input" id="${isSignup ? "signupEmail" : "loginEmail"}" type="email" autocomplete="email" placeholder="Email address" required />
+        <input class="input" id="${isSignup ? "signupPassword" : "loginPassword"}" type="password" autocomplete="${isSignup ? "new-password" : "current-password"}" minlength="6" placeholder="Password" required />
+        <button class="btn" type="submit">${isSignup ? "Create Account" : "Login"}</button>
+      </form>
+      ${!isSignup ? `<p style="margin: 16px 0 0;"><button class="text-button" data-action="reset-password">Forgot password?</button></p>` : `<p style="margin: 16px 0 0;">Password must be at least 6 characters.</p>`}
+    `;
+  }
+
   appEl.innerHTML = `
     <section class="screen center-screen">
       <div class="brand-card auth-card">
         <div class="logo-mark">♠</div>
         <span class="badge">Realtime Multiplayer</span>
-        <h1>${isSignup ? "Create Account" : "Login"}</h1>
-        <p>${isSignup ? "Make your Bluff account with a username, email and password." : "Login to create or join online Bluff rooms."}</p>
+        <h1>${isGuest ? "Play as Guest" : isSignup ? "Create Account" : "Login"}</h1>
+        <p>${isGuest ? "Jump straight into a room with just a name." : isSignup ? "Make your Bluff account with a username, email and password." : "Login to create or join online Bluff rooms."}</p>
 
         <div class="auth-tabs" role="tablist" aria-label="Authentication tabs">
-          <button type="button" class="auth-tab ${!isSignup ? "active" : ""}" data-action="show-login">Login</button>
+          <button type="button" class="auth-tab ${!isSignup && !isGuest ? "active" : ""}" data-action="show-login">Login</button>
           <button type="button" class="auth-tab ${isSignup ? "active" : ""}" data-action="show-signup">Sign Up</button>
+          <button type="button" class="auth-tab ${isGuest ? "active" : ""}" data-action="show-guest">Guest</button>
         </div>
 
-        <form id="${isSignup ? "signupForm" : "loginForm"}" class="form">
-          ${isSignup ? `<input class="input" id="signupUsername" maxlength="18" autocomplete="name" placeholder="Username" required />` : ""}
-          <input class="input" id="${isSignup ? "signupEmail" : "loginEmail"}" type="email" autocomplete="email" placeholder="Email address" required />
-          <input class="input" id="${isSignup ? "signupPassword" : "loginPassword"}" type="password" autocomplete="${isSignup ? "new-password" : "current-password"}" minlength="6" placeholder="Password" required />
-          <button class="btn" type="submit">${isSignup ? "Create Account" : "Login"}</button>
-        </form>
-
-        ${!isSignup ? `<p style="margin: 16px 0 0;"><button class="text-button" data-action="reset-password">Forgot password?</button></p>` : `<p style="margin: 16px 0 0;">Password must be at least 6 characters.</p>`}
+        ${formHTML}
       </div>
     </section>
   `;
@@ -359,32 +493,140 @@ function renderNameScreen() {
 }
 
 function renderHome() {
-  const email = currentUser?.email || "";
+  const stats = getPlayerStats();
+  const isGuest = Boolean(currentUser?.isAnonymous);
+  const ring = avatarRingColor(currentUser?.uid);
+
   appEl.innerHTML = `
-    <section class="screen hero">
-      <div class="brand-card">
-        <div class="logo-mark">♠</div>
-        <span class="badge">2 to 6 Players</span>
+    <section class="screen">
+      <div class="home-topbar">
+        <button class="profile-pill" data-action="open-profile" type="button">
+          <span class="avatar-ring" style="--ring:${ring}"><span class="avatar-emoji">${escapeHTML(playerAvatar)}</span></span>
+          <span class="profile-pill-text">
+            <strong>${escapeHTML(playerName || "Player")}</strong>
+            <span>${isGuest ? "Guest account" : "View profile"}</span>
+          </span>
+        </button>
+        <button class="icon-btn" data-action="logout" title="Logout" aria-label="Logout">⎋</button>
+      </div>
+
+      <div class="hero-banner">
+        <span class="badge">2 to 6 Players · Realtime</span>
         <h1>${APP_NAME}</h1>
         <p>Create a room, invite friends, play cards face-down, and call Bluff when someone is lying.</p>
-        <div class="home-grid">
-          <button class="btn" data-action="create-room">Create Room</button>
-          <button class="btn secondary" data-action="open-join">Join Room</button>
-          <button class="btn secondary" data-action="how-to-play">How to Play</button>
+      </div>
+
+      <div class="stat-row">
+        ${renderMiniStat("Played", stats.gamesPlayed)}
+        ${renderMiniStat("Won", stats.gamesWon)}
+        ${renderMiniStat("Bluffs Caught", stats.bluffsCaught)}
+      </div>
+
+      <div class="home-grid">
+        <button class="action-card primary" data-action="create-room">
+          <span class="action-icon">♠</span>
+          <span class="action-text"><strong>Create Room</strong><span>Start a new table and invite friends</span></span>
+        </button>
+        <button class="action-card" data-action="open-join">
+          <span class="action-icon">🔑</span>
+          <span class="action-text"><strong>Join Room</strong><span>Enter a 6-character room code</span></span>
+        </button>
+        <button class="action-card" data-action="how-to-play">
+          <span class="action-icon">📖</span>
+          <span class="action-text"><strong>How to Play</strong><span>Quick rules refresher</span></span>
+        </button>
+      </div>
+
+      ${isGuest ? `
+        <div class="panel guest-banner">
+          <strong>Playing as a guest</strong>
+          <p style="margin: 6px 0 0;">Your stats are saved, but only on this device. Save your profile with an email to keep it forever and sign in elsewhere.</p>
+          <button class="btn secondary" style="margin-top: 12px;" data-action="open-profile">Save My Profile</button>
         </div>
-        <div class="profile-mini">
-          <div>
-            <strong>${escapeHTML(playerName || "Player")}</strong>
-            <span>${escapeHTML(email)}</span>
-          </div>
-          <div class="profile-actions">
-            <button class="text-button" data-action="change-name">Edit username</button>
-            <button class="text-button" data-action="logout">Logout</button>
-          </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderMiniStat(label, value) {
+  return `
+    <div class="mini-stat">
+      <strong>${Number(value || 0)}</strong>
+      <span>${escapeHTML(label)}</span>
+    </div>
+  `;
+}
+
+function renderProfile() {
+  const stats = getPlayerStats();
+  const isGuest = Boolean(currentUser?.isAnonymous);
+  const ring = avatarRingColor(currentUser?.uid);
+  const winRate = stats.gamesPlayed ? Math.round((stats.gamesWon / stats.gamesPlayed) * 100) : 0;
+  const bluffAttempts = stats.bluffsLanded + stats.bluffsBackfired;
+  const bluffSuccessRate = bluffAttempts ? Math.round((stats.bluffsLanded / bluffAttempts) * 100) : 0;
+
+  appEl.innerHTML = `
+    <section class="screen">
+      <div class="topbar">
+        <div class="topbar-title">
+          <strong>Your Profile</strong>
+          <span>${isGuest ? "Guest account" : escapeHTML(currentUser?.email || "")}</span>
         </div>
+        <button class="btn secondary" data-action="back-home">Back</button>
+      </div>
+
+      <div class="panel profile-hero">
+        <button class="avatar-ring avatar-ring-lg" style="--ring:${ring}" data-action="open-avatar-picker" type="button" aria-label="Change avatar">
+          <span class="avatar-emoji">${escapeHTML(playerAvatar)}</span>
+          <span class="avatar-edit-badge">✎</span>
+        </button>
+        <form id="profileNameForm" class="form" style="margin-top: 18px;">
+          <input class="input" id="profileNameInput" maxlength="18" autocomplete="name" placeholder="Display name" value="${escapeHTML(playerName)}" required />
+          <button class="btn" type="submit">Save Name</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h2>Stats</h2>
+        <div class="stat-grid">
+          <div class="stat-tile"><strong>${stats.gamesPlayed}</strong><span>Games Played</span></div>
+          <div class="stat-tile"><strong>${stats.gamesWon}</strong><span>Games Won</span></div>
+          <div class="stat-tile"><strong>${winRate}%</strong><span>Win Rate</span></div>
+          <div class="stat-tile"><strong>${stats.bluffsCaught}</strong><span>Bluffs Caught</span></div>
+          <div class="stat-tile"><strong>${stats.bluffsLanded}</strong><span>Bluffs Landed</span></div>
+          <div class="stat-tile"><strong>${bluffSuccessRate}%</strong><span>Bluff Success</span></div>
+        </div>
+      </div>
+
+      ${isGuest ? `
+        <div class="panel guest-banner">
+          <strong>Save your profile</strong>
+          <p style="margin: 6px 0 14px;">Add an email and password so your name, avatar, and stats are never lost — and so you can log in from any device.</p>
+          <form id="upgradeForm" class="form">
+            <input class="input" id="upgradeEmail" type="email" autocomplete="email" placeholder="Email address" required />
+            <input class="input" id="upgradePassword" type="password" autocomplete="new-password" minlength="6" placeholder="Choose a password" required />
+            <button class="btn" type="submit">Save My Profile</button>
+          </form>
+        </div>
+      ` : ""}
+
+      <div class="panel">
+        <button class="text-button" data-action="logout">Logout</button>
       </div>
     </section>
   `;
+}
+
+function openAvatarPicker() {
+  const grid = AVATARS.map((emoji) => `
+    <button type="button" class="avatar-option ${emoji === playerAvatar ? "selected" : ""}" data-avatar="${escapeHTML(emoji)}">${escapeHTML(emoji)}</button>
+  `).join("");
+
+  showModal("Choose your avatar", `
+    <div class="avatar-grid">${grid}</div>
+  `, `
+    <button class="btn secondary" data-action="close-modal">Close</button>
+  `);
 }
 
 function renderJoinRoom() {
@@ -459,6 +701,7 @@ async function createRoom() {
       players: {
         [uid]: {
           name: playerName,
+          avatar: playerAvatar,
           cardsCount: 0,
           isHost: true,
           online: true,
@@ -544,6 +787,7 @@ async function joinRoom(roomCode) {
 
     await targetRef.child(`players/${uid}`).update({
       name: playerName,
+      avatar: playerAvatar,
       cardsCount: players[uid]?.cardsCount || 0,
       isHost: room.hostId === uid,
       online: true,
@@ -697,10 +941,11 @@ function renderWaitingRoom(room) {
 
 function renderWaitingPlayer(uid, player, hostId) {
   const online = player.online ? "online" : "";
+  const ring = avatarRingColor(uid);
   return `
     <div class="player-item">
       <div class="player-left">
-        <div class="avatar">${escapeHTML(getInitial(player.name))}</div>
+        <span class="avatar-ring" style="--ring:${ring}"><span class="avatar-emoji">${escapeHTML(player.avatar || DEFAULT_AVATAR)}</span></span>
         <div style="min-width: 0;">
           <div class="player-name">${escapeHTML(player.name || "Player")}</div>
           <div class="player-meta">${uid === hostId ? "Host" : "Player"}${uid === currentUser?.uid ? " · You" : ""}</div>
@@ -816,15 +1061,17 @@ function renderGame(room) {
   const playButtonLabel = roundRank ? `Play ${getRankName(roundRank, 2)} Set` : "Play Selected Cards";
 
   appEl.innerHTML = `
-    <section class="screen">
+    <section class="screen game-screen">
       <div class="table-panel">
         <div class="game-header">
-          <div>
+          <div class="game-header-top">
             <div class="room-code">${escapeHTML(currentRoomCode)}</div>
-            <h2 style="margin: 10px 0 4px;">${isMyTurn ? "Your Turn" : `${escapeHTML(currentTurnName)}'s Turn`}</h2>
-            <div class="turn-pill ${isMyTurn ? "my-turn" : ""}">${isMyTurn ? (roundRank ? "Play same set, pass, or call bluff" : "Start a new set") : "Wait for your turn"}</div>
+            <button class="icon-btn" data-action="confirm-leave-game" title="Leave game" aria-label="Leave game">⎋</button>
           </div>
-          <button class="btn secondary" data-action="confirm-leave-game">Leave</button>
+          <div class="turn-pill ${isMyTurn ? "my-turn" : ""}">
+            <span class="turn-dot"></span>
+            ${isMyTurn ? "Your turn — play same set, pass, or call bluff" : `Waiting on ${escapeHTML(currentTurnName)}`}
+          </div>
         </div>
 
         <div class="players-strip">
@@ -838,7 +1085,7 @@ function renderGame(room) {
               ${renderPileCards(pile.length)}
             </div>
             <div class="last-claim">
-              ${lastMove ? `${escapeHTML(lastMove.playerName || "Player")} claimed ${lastMove.claimedCount} ${escapeHTML(getRankName(lastMove.claimedRank, lastMove.claimedCount))}` : "No claim yet"}
+              ${lastMove ? `<strong>${escapeHTML(lastMove.playerName || "Player")}</strong> claimed <strong>${lastMove.claimedCount}× ${escapeHTML(getRankName(lastMove.claimedRank, lastMove.claimedCount))}</strong>` : "No claim yet"}
               <small>${roundRank ? `Current set: ${escapeHTML(getRankName(roundRank, 2))}` : "Start any rank"}</small>
               ${passes.length ? `<small>${passes.length} pass${passes.length === 1 ? "" : "es"} after last play</small>` : ""}
             </div>
@@ -882,7 +1129,7 @@ function renderPlayerChips(room, currentTurnId) {
     const you = uid === currentUser?.uid ? " · You" : "";
     return `
       <div class="player-chip ${isActive ? "active" : ""}">
-        <span title="${escapeHTML(player.name || "Player")}">${escapeHTML(shortName(player.name || "Player"))}${you}</span>
+        <span class="chip-avatar" title="${escapeHTML(player.name || "Player")}">${escapeHTML(player.avatar || DEFAULT_AVATAR)} ${escapeHTML(shortName(player.name || "Player"))}${you}</span>
         <strong>${Number(player.cardsCount || 0)} cards</strong>
       </div>
     `;
@@ -1131,6 +1378,12 @@ async function passTurn() {
         timestamp: Date.now()
       };
       showToast("Everyone passed. Pile cleared.");
+
+      // The last-move player's claim survived without being challenged.
+      // If it was actually a lie, it landed successfully.
+      if (isBluff(lastMove)) {
+        recordGameStats({ bluffsLanded: 1 }).catch(() => {});
+      }
     } else {
       updatedRoom.currentTurnIndex = nextIndex;
       updatedRoom.roundMessage = {
@@ -1198,8 +1451,14 @@ async function callBluff() {
       cardsCount: updatedHands[loserId].length
     };
 
-    const loserIndex = turnOrder.indexOf(loserId);
-    let nextTurnIndex = loserIndex >= 0 ? loserIndex : turnOrder.indexOf(callerId);
+    // The pile always goes to the loser, but the NEXT TURN goes to the winner
+    // of this exchange:
+    // - If it really was a bluff, the caller correctly caught it -> caller's turn next.
+    // - If it was honest, the caller was wrong -> turn goes back to the player
+    //   who made the (honest) move, so they can start a fresh set.
+    const winnerId = wasBluff ? callerId : lastMove.playerId;
+    const winnerIndex = turnOrder.indexOf(winnerId);
+    let nextTurnIndex = winnerIndex >= 0 ? winnerIndex : turnOrder.indexOf(loserId);
     if (nextTurnIndex < 0) nextTurnIndex = 0;
 
     const updatedRoom = {
@@ -1246,7 +1505,14 @@ async function callBluff() {
 
 function showResultIfNeeded(room) {
   const result = room.lastResult;
-  if (!result || !result.id || result.id === lastShownResultId) return;
+  if (!result || !result.id) return;
+
+  if (!countedBluffResultIds.has(result.id)) {
+    countedBluffResultIds.add(result.id);
+    recordBluffOutcome(result);
+  }
+
+  if (result.id === lastShownResultId) return;
   lastShownResultId = result.id;
 
   const cards = (result.revealedCards || []).map((card, i) => renderCard(card, { flipDelay: i })).join("");
@@ -1278,6 +1544,22 @@ function showRoundMessageIfNeeded(room) {
 function isBluff(lastMove) {
   if (!lastMove || !lastMove.claimedRank || !Array.isArray(lastMove.actualCards)) return false;
   return lastMove.actualCards.some((card) => getCardRank(card) !== lastMove.claimedRank);
+}
+
+function recordBluffOutcome(result) {
+  const myUid = currentUser?.uid;
+  if (!myUid) return;
+
+  if (result.callerId === myUid) {
+    // I called bluff. wasBluff true means they really were bluffing (I caught them).
+    // wasBluff false means they were honest (my call backfired and I pick up the pile).
+    recordGameStats({ bluffsCaught: result.wasBluff ? 1 : 0 }).catch(() => {});
+  }
+
+  if (result.playerId === myUid && result.callerId !== myUid && result.wasBluff) {
+    // I was the one who played the cards, I was bluffing, and I got caught.
+    recordGameStats({ bluffsBackfired: 1 }).catch(() => {});
+  }
 }
 
 function pickUpPile(hand, pile) {
@@ -1372,6 +1654,7 @@ function clearRoomLocalState() {
   unsubscribeRoom();
   clearTimeout(dealAnimationTimer);
   dealAnimationRoomCode = "";
+  if (currentRoomCode) countedFinishedRooms.delete(currentRoomCode);
   currentRoomCode = "";
   currentRoom = null;
   selectedCards = [];
@@ -1404,7 +1687,18 @@ function selectCard(card) {
   const index = selectedCards.indexOf(card);
   if (index >= 0) selectedCards.splice(index, 1);
   else selectedCards.push(card);
+
+  const cardsRow = document.getElementById("cardsRow");
+  const scrollLeft = cardsRow ? cardsRow.scrollLeft : 0;
+  const scrollTop = cardsRow ? cardsRow.scrollTop : 0;
+
   renderCurrentScreen();
+
+  const newCardsRow = document.getElementById("cardsRow");
+  if (newCardsRow) {
+    newCardsRow.scrollLeft = scrollLeft;
+    newCardsRow.scrollTop = scrollTop;
+  }
 }
 
 function createDeck() {
@@ -1578,6 +1872,12 @@ function confirmLeaveGame() {
 function renderWinner(room) {
   const winner = room.winner;
   const isMe = winner?.uid === currentUser?.uid;
+
+  if (currentRoomCode && !countedFinishedRooms.has(currentRoomCode)) {
+    countedFinishedRooms.add(currentRoomCode);
+    recordGameStats({ countGame: true, won: isMe }).catch(() => {});
+  }
+
   appEl.innerHTML = `
     <section class="screen center-screen">
       <div class="brand-card">
@@ -1646,6 +1946,32 @@ document.addEventListener("submit", (event) => {
       .catch((error) => showToast(error.message || "Could not save username"));
   }
 
+  if (event.target.id === "profileNameForm") {
+    const input = document.getElementById("profileNameInput");
+    const value = String(input.value || "").trim().slice(0, 18);
+    if (!value) {
+      showToast("Enter a display name");
+      return;
+    }
+    saveUserProfile(value)
+      .then(() => {
+        showToast("Profile updated");
+        renderCurrentScreen();
+      })
+      .catch((error) => showToast(error.message || "Could not save profile"));
+  }
+
+  if (event.target.id === "upgradeForm") {
+    upgradeGuestAccount(
+      document.getElementById("upgradeEmail")?.value,
+      document.getElementById("upgradePassword")?.value
+    );
+  }
+
+  if (event.target.id === "guestForm") {
+    loginAsGuest(document.getElementById("guestName")?.value);
+  }
+
   if (event.target.id === "joinForm") {
     const input = document.getElementById("roomCodeInput");
     joinRoom(input.value);
@@ -1653,6 +1979,18 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("click", (event) => {
+  const avatarEl = event.target.closest("[data-avatar]");
+  if (avatarEl) {
+    saveUserAvatar(avatarEl.dataset.avatar)
+      .then(() => {
+        closeModal();
+        showToast("Avatar updated");
+        renderCurrentScreen();
+      })
+      .catch((error) => showToast(error.message || "Could not update avatar"));
+    return;
+  }
+
   const cardEl = event.target.closest("[data-card]");
   if (cardEl) {
     selectCard(cardEl.dataset.card);
@@ -1672,6 +2010,10 @@ document.addEventListener("click", (event) => {
     authMode = "signup";
     navigate("auth", false);
   }
+  if (action === "show-guest") {
+    authMode = "guest";
+    navigate("auth", false);
+  }
   if (action === "logout") logout();
   if (action === "reset-password") resetPasswordPrompt();
   if (action === "send-reset-email") sendPasswordReset();
@@ -1679,6 +2021,8 @@ document.addEventListener("click", (event) => {
   if (action === "open-join") navigate("join");
   if (action === "how-to-play") navigate("how");
   if (action === "back-home") navigate("home");
+  if (action === "open-profile") navigate("profile");
+  if (action === "open-avatar-picker") openAvatarPicker();
   if (action === "change-name") navigate("name");
   if (action === "copy-room-code") copyRoomCode();
   if (action === "start-game") startGame();
