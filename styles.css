@@ -94,7 +94,7 @@ a {
   width: min(100%, 1080px);
   min-height: 100dvh;
   margin: 0 auto;
-  padding: calc(18px + env(safe-area-inset-top)) 16px calc(20px + env(safe-area-inset-bottom));
+  padding: calc(18px + env(safe-area-inset-top)) 8px calc(20px + env(safe-area-inset-bottom));
 }
 
 .center-screen {
@@ -449,8 +449,8 @@ button:focus-visible,
 
 /* ============ Game table ============ */
 .table-panel {
-  min-height: calc(100dvh - 32px);
-  padding: 16px;
+  min-height: calc(100dvh - 16px);
+  padding: 10px;
   display: flex;
   flex-direction: column;
   background:
@@ -628,7 +628,7 @@ button:focus-visible,
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
-  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+  padding: 12px 8px calc(12px + env(safe-area-inset-bottom));
   position: sticky;
   bottom: 0;
   margin-top: auto;
@@ -660,7 +660,7 @@ button:focus-visible,
   overflow-y: auto;
   max-height: 300px;
   padding: 20px 4px 10px;
-  justify-content: center;
+  justify-content: flex-start;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -676,10 +676,10 @@ button:focus-visible,
 /* ============ Playing cards ============ */
 .card,
 .card-back {
-  width: 64px;
-  height: 92px;
-  flex: 0 0 64px;
-  border-radius: 11px;
+  width: 56px;
+  height: 80px;
+  flex: 0 0 56px;
+  border-radius: 10px;
   position: relative;
   user-select: none;
   scroll-snap-align: start;
@@ -785,7 +785,7 @@ button:focus-visible,
   gap: 6px;
   flex: 0 0 auto;
   padding-top: 22px;
-  margin: 0 8px 22px 0;
+  margin: 0 5px 22px 0;
 }
 
 .card-group.has-pair {
@@ -1184,13 +1184,13 @@ button:focus-visible,
 @media (max-width: 380px) {
   .card,
   .card-back {
-    width: 58px;
-    height: 84px;
-    flex-basis: 58px;
+    width: 50px;
+    height: 72px;
+    flex-basis: 50px;
   }
 
   .card .center-suit {
-    font-size: 28px;
+    font-size: 24px;
   }
 
   .room-code {
