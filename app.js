@@ -65,6 +65,88 @@ let lastShownResultId = "";
 let lastShownRoundMessageId = "";
 const countedBluffResultIds = new Set();
 const countedFinishedRooms = new Set();
+
+let audioCtx = null;
+let soundEnabled = localStorage.getItem("bluffSoundEnabled") !== "off";
+
+function getAudioCtx() {
+  if (!soundEnabled) return null;
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audioCtx = new Ctx();
+  }
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  return audioCtx;
+}
+
+function playTone(freq, duration, options = {}) {
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  const startAt = ctx.currentTime + (options.delay || 0);
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = options.type || "sine";
+  osc.frequency.setValueAtTime(freq, startAt);
+  if (options.slideTo) {
+    osc.frequency.exponentialRampToValueAtTime(Math.max(1, options.slideTo), startAt + duration);
+  }
+  const peak = options.volume || 0.18;
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peak, startAt + Math.min(0.02, duration / 4));
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + duration + 0.02);
+}
+
+function playCardSound() {
+  // A short, dry click/flick for placing a card.
+  const ctx = getAudioCtx();
+  if (!ctx) return;
+  playTone(720, 0.05, { type: "square", volume: 0.07, slideTo: 280 });
+  playTone(180, 0.04, { type: "triangle", volume: 0.05, delay: 0.01 });
+}
+
+function playSelectSound() {
+  playTone(960, 0.045, { type: "sine", volume: 0.05, slideTo: 1200 });
+}
+
+function playPassSound() {
+  playTone(360, 0.12, { type: "sine", volume: 0.07, slideTo: 220 });
+}
+
+function playBluffCallSound() {
+  // A dramatic descending sting for the high-stakes bluff call moment.
+  playTone(700, 0.18, { type: "sawtooth", volume: 0.1, slideTo: 140 });
+  playTone(900, 0.14, { type: "square", volume: 0.06, delay: 0.04, slideTo: 200 });
+}
+
+function playBluffResultSound(wasBluffCaught) {
+  if (wasBluffCaught) {
+    // Caught: a triumphant little rising sting.
+    playTone(440, 0.1, { type: "triangle", volume: 0.12 });
+    playTone(660, 0.12, { type: "triangle", volume: 0.12, delay: 0.09 });
+    playTone(880, 0.16, { type: "triangle", volume: 0.12, delay: 0.18 });
+  } else {
+    // Backfired: a low descending "whomp".
+    playTone(320, 0.2, { type: "sawtooth", volume: 0.1, slideTo: 90 });
+  }
+}
+
+function playWinSound() {
+  [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+    playTone(freq, 0.22, { type: "triangle", volume: 0.12, delay: i * 0.11 });
+  });
+}
+
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  localStorage.setItem("bluffSoundEnabled", soundEnabled ? "on" : "off");
+  if (soundEnabled) playSelectSound();
+  renderCurrentScreen();
+}
 let toastTimer = null;
 let dealAnimationRoomCode = "";
 let dealAnimationTimer = null;
@@ -805,10 +887,13 @@ async function joinRoom(roomCode) {
   }
 }
 
+let lastSeenMoveTimestamp = 0;
+
 function subscribeToRoom(roomCode) {
   unsubscribeRoom();
   currentRoomCode = roomCode;
   roomRef = db.ref(`rooms/${roomCode}`);
+  lastSeenMoveTimestamp = 0;
 
   roomListener = roomRef.on("value", (snapshot) => {
     const room = snapshot.val();
@@ -818,6 +903,17 @@ function subscribeToRoom(roomCode) {
       showToast("Room closed");
       navigate("home", false);
       return;
+    }
+
+    // Play a card sound when a move appears from someone else's action
+    // (our own plays already get sound from playSelectedCards directly,
+    // this covers what other players hear in real time).
+    const moveTimestamp = Number(room.lastMove?.timestamp || 0);
+    if (moveTimestamp && moveTimestamp > lastSeenMoveTimestamp) {
+      if (lastSeenMoveTimestamp > 0 && room.lastMove?.playerId !== currentUser?.uid) {
+        playCardSound();
+      }
+      lastSeenMoveTimestamp = moveTimestamp;
     }
 
     currentRoom = room;
@@ -1066,7 +1162,10 @@ function renderGame(room) {
         <div class="game-header">
           <div class="game-header-top">
             <div class="room-code">${escapeHTML(currentRoomCode)}</div>
-            <button class="icon-btn" data-action="confirm-leave-game" title="Leave game" aria-label="Leave game">⎋</button>
+            <div class="header-actions">
+              <button class="icon-btn" data-action="toggle-sound" title="${soundEnabled ? "Mute sounds" : "Unmute sounds"}" aria-label="Toggle sound">${soundEnabled ? "🔊" : "🔇"}</button>
+              <button class="icon-btn" data-action="confirm-leave-game" title="Leave game" aria-label="Leave game">⎋</button>
+            </div>
           </div>
           <div class="turn-pill ${isMyTurn ? "my-turn" : ""}">
             <span class="turn-dot"></span>
@@ -1079,20 +1178,27 @@ function renderGame(room) {
         </div>
 
         <div class="game-center">
-          <div class="pile-zone">
-            ${pile.length ? `<div class="pile-count-tag">${pile.length} card${pile.length === 1 ? "" : "s"}</div>` : ""}
-            <div class="pile-cards">
-              ${renderPileCards(pile.length)}
-            </div>
-            <div class="last-claim">
-              ${lastMove ? `<strong>${escapeHTML(lastMove.playerName || "Player")}</strong> claimed <strong>${lastMove.claimedCount}× ${escapeHTML(getRankName(lastMove.claimedRank, lastMove.claimedCount))}</strong>` : "No claim yet"}
-              <small>${roundRank ? `Current set: ${escapeHTML(getRankName(roundRank, 2))}` : "Start any rank"}</small>
-              ${passes.length ? `<small>${passes.length} pass${passes.length === 1 ? "" : "es"} after last play</small>` : ""}
-            </div>
-            <div class="btn-row" style="margin-top: 14px; justify-content: center;">
-              ${bluffAllowed ? `<button class="btn danger" data-action="call-bluff">⚑ Call Bluff</button>` : ""}
-              ${passAllowed ? `<button class="btn secondary" data-action="pass-turn">Pass</button>` : ""}
-            </div>
+          <div class="pile-zone ${pile.length ? "" : "pile-empty"}">
+            ${pile.length ? `
+              <div class="pile-count-tag">${pile.length} card${pile.length === 1 ? "" : "s"}</div>
+              <div class="pile-cards">
+                ${renderPileCards(pile.length)}
+              </div>
+              <div class="last-claim">
+                ${lastMove ? `<strong>${escapeHTML(lastMove.playerName || "Player")}</strong> claimed <strong>${lastMove.claimedCount}× ${escapeHTML(getRankName(lastMove.claimedRank, lastMove.claimedCount))}</strong>` : ""}
+                <small>${roundRank ? `Current set: ${escapeHTML(getRankName(roundRank, 2))}` : ""}</small>
+                ${passes.length ? `<small>${passes.length} pass${passes.length === 1 ? "" : "es"} after last play</small>` : ""}
+                ${(room.pendingWinner && lastMove && room.pendingWinner.uid === lastMove.playerId) ? `<small class="pending-winner-note">⚠ ${escapeHTML(room.pendingWinner.name)} has no cards left — call Bluff if you don't believe this claim, or they win next round</small>` : ""}
+              </div>
+            ` : `
+              <div class="last-claim">No claim yet · start any rank</div>
+            `}
+            ${(bluffAllowed || passAllowed) ? `
+              <div class="btn-row" style="margin-top: 10px; justify-content: center;">
+                ${bluffAllowed ? `<button class="btn danger" data-action="call-bluff">⚑ Call Bluff</button>` : ""}
+                ${passAllowed ? `<button class="btn secondary" data-action="pass-turn">Pass</button>` : ""}
+              </div>
+            ` : ""}
           </div>
         </div>
 
@@ -1102,7 +1208,7 @@ function renderGame(room) {
               <strong>Your Cards</strong>
               <span> · ${myHand.length} left</span>
             </div>
-            <span>${selectedCards.length} selected</span>
+            <span class="selected-count ${selectedCards.length > 0 ? "active" : ""}">${selectedCards.length}/4 selected</span>
           </div>
           <div id="cardsRow" class="cards-row">
             ${renderCards(myHand)}
@@ -1147,13 +1253,17 @@ function renderCards(cards) {
     return `<div class="empty-state">No cards left</div>`;
   }
 
+  const limitReached = selectedCards.length >= 4;
   const grouped = groupCardsByRank(sortHand(cards));
   let cardIndex = 0;
   return grouped.map((group) => {
     const cardsHTML = group.cards.map((card) => {
+      const isSelected = selectedCards.includes(card);
       const html = renderCard(card, {
         selectable: true,
-        selected: selectedCards.includes(card),
+        selected: isSelected,
+        selectionOrder: isSelected ? selectedCards.indexOf(card) + 1 : 0,
+        capped: limitReached && !isSelected,
         index: cardIndex
       });
       cardIndex += 1;
@@ -1176,11 +1286,14 @@ function renderCard(card, options = {}) {
   const red = suit === "H" || suit === "D";
   const selected = options.selected ? "selected" : "";
   const selectable = options.selectable ? "tap-card" : "";
+  const capped = options.capped ? "capped" : "";
   const data = options.selectable ? `data-card="${escapeHTML(card)}" data-card-index="${Number(options.index || 0)}"` : "";
   const style = options.flipDelay !== undefined ? `style="--i:${Number(options.flipDelay)};"` : "";
+  const orderBadge = options.selected && options.selectionOrder ? `<span class="select-order">${Number(options.selectionOrder)}</span>` : "";
 
   return `
-    <div class="card ${red ? "red" : ""} ${selected} ${selectable}" ${data} ${style} role="button" aria-label="${escapeHTML(card)}">
+    <div class="card ${red ? "red" : ""} ${selected} ${selectable} ${capped}" ${data} ${style} role="button" aria-label="${escapeHTML(card)}">
+      ${orderBadge}
       <div class="corner top-left"><span>${escapeHTML(rank)}</span><span class="suit-small">${symbol}</span></div>
       <div class="center-suit">${symbol}</div>
       <div class="corner bottom-right"><span>${escapeHTML(rank)}</span><span class="suit-small">${symbol}</span></div>
@@ -1197,9 +1310,15 @@ function openClaimPopup() {
     showToast("Select at least one card");
     return;
   }
+  if (selectedCards.length > 4) {
+    showToast("You can play at most 4 cards at once");
+    return;
+  }
 
   const forcedRank = currentRoom?.roundRank || currentRoom?.lastMove?.claimedRank || "";
-  const availableRanks = forcedRank ? [forcedRank] : RANKS;
+  const revealedRankCounts = currentRoom?.revealedRankCounts || {};
+  const liveRanks = RANKS.filter((rank) => (revealedRankCounts[rank] || 0) < 4);
+  const availableRanks = forcedRank ? [forcedRank] : liveRanks;
   const rankOptions = availableRanks.map((rank) => `<option value="${rank}">${getRankName(rank, selectedCards.length)}</option>`).join("");
 
   showModal(`Claim ${selectedCards.length} card${selectedCards.length === 1 ? "" : "s"}`, `
@@ -1216,6 +1335,10 @@ async function playSelectedCards(claimedRank) {
   if (!currentRoomCode || !ensureReady() || isBusy) return;
   if (!selectedCards.length) {
     showToast("Select at least one card");
+    return;
+  }
+  if (selectedCards.length > 4) {
+    showToast("You can play at most 4 cards at once");
     return;
   }
   if (!RANKS.includes(claimedRank)) {
@@ -1285,16 +1408,13 @@ async function playSelectedCards(claimedRank) {
       cardsCount: newHand.length
     };
 
-    if (checkWinner(newHand)) {
-      updatedRoom.status = "finished";
-      updatedRoom.winner = {
-        uid,
-        name: updatedRoom.players?.[uid]?.name || playerName
-      };
-      updatedRoom.finishedAt = Date.now();
-    } else {
-      updatedRoom.currentTurnIndex = getNextPlayerIndex(turnOrder, currentTurnIndex);
-    }
+    // If this empties the player's hand, we don't declare them the winner
+    // immediately. The next player still gets a turn and can Pass or Call
+    // Bluff on this claim. Only if the claim survives unchallenged (the
+    // round clears back to this player) do they actually win — this stops
+    // someone from "winning" by lying about their last cards.
+    updatedRoom.currentTurnIndex = getNextPlayerIndex(turnOrder, currentTurnIndex);
+    updatedRoom.pendingWinner = newHand.length === 0 ? { uid, name: updatedRoom.players?.[uid]?.name || playerName } : null;
 
     // Direct set is used here because Realtime Database transactions were
     // causing some browsers/WebViews to get stuck after Confirm Play.
@@ -1304,6 +1424,7 @@ async function playSelectedCards(claimedRank) {
     closeModal(false);
     currentRoom = updatedRoom;
     renderGame(updatedRoom);
+    playCardSound();
     showToast("Cards played");
   } catch (error) {
     console.error("Play selected cards error", error);
@@ -1364,6 +1485,7 @@ async function passTurn() {
     };
 
     selectedCards = [];
+    playPassSound();
 
     if (roundShouldClear) {
       updatedRoom.pile = [];
@@ -1383,6 +1505,15 @@ async function passTurn() {
       // If it was actually a lie, it landed successfully.
       if (isBluff(lastMove)) {
         recordGameStats({ bluffsLanded: 1 }).catch(() => {});
+      }
+
+      // If the player who made that last move emptied their hand and
+      // nobody challenged them in time, they have genuinely won now.
+      if (room.pendingWinner && room.pendingWinner.uid === lastMove.playerId) {
+        updatedRoom.status = "finished";
+        updatedRoom.winner = room.pendingWinner;
+        updatedRoom.finishedAt = Date.now();
+        updatedRoom.pendingWinner = null;
       }
     } else {
       updatedRoom.currentTurnIndex = nextIndex;
@@ -1408,6 +1539,7 @@ async function passTurn() {
 async function callBluff() {
   if (!currentRoomCode || !ensureReady() || isBusy) return;
   setBusy(true);
+  playBluffCallSound();
 
   const callerId = currentUser.uid;
   const targetRef = db.ref(`rooms/${currentRoomCode}`);
@@ -1461,6 +1593,19 @@ async function callBluff() {
     let nextTurnIndex = winnerIndex >= 0 ? winnerIndex : turnOrder.indexOf(loserId);
     if (nextTurnIndex < 0) nextTurnIndex = 0;
 
+    const revealedRankCounts = { ...(room.revealedRankCounts || {}) };
+    (lastMove.actualCards || []).forEach((card) => {
+      const r = getCardRank(card);
+      revealedRankCounts[r] = (revealedRankCounts[r] || 0) + 1;
+    });
+
+    // Special case: the claim was honest, the caller was wrong, AND the
+    // mover's hand is now empty (this was their last card / cards). Their
+    // claim has just been proven true by the reveal, so they win right now
+    // instead of getting a turn they can't use.
+    const moverHandEmpty = (updatedHands[lastMove.playerId] || []).length === 0;
+    const moverJustWon = !wasBluff && moverHandEmpty;
+
     const updatedRoom = {
       ...room,
       hands: updatedHands,
@@ -1471,6 +1616,8 @@ async function callBluff() {
       passes: [],
       firstPassAfterLastMove: null,
       currentTurnIndex: nextTurnIndex,
+      revealedRankCounts,
+      pendingWinner: null,
       lastResult: {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         callerId,
@@ -1489,6 +1636,12 @@ async function callBluff() {
         timestamp: Date.now()
       }
     };
+
+    if (moverJustWon) {
+      updatedRoom.status = "finished";
+      updatedRoom.winner = { uid: lastMove.playerId, name: playerNameWhoMoved };
+      updatedRoom.finishedAt = Date.now();
+    }
 
     await targetRef.set(updatedRoom);
 
@@ -1514,6 +1667,8 @@ function showResultIfNeeded(room) {
 
   if (result.id === lastShownResultId) return;
   lastShownResultId = result.id;
+
+  playBluffResultSound(Boolean(result.wasBluff));
 
   const cards = (result.revealedCards || []).map((card, i) => renderCard(card, { flipDelay: i })).join("");
   const isCaught = Boolean(result.wasBluff);
@@ -1685,8 +1840,17 @@ function fallbackCopy(text) {
 function selectCard(card) {
   if (!card) return;
   const index = selectedCards.indexOf(card);
-  if (index >= 0) selectedCards.splice(index, 1);
-  else selectedCards.push(card);
+  if (index >= 0) {
+    selectedCards.splice(index, 1);
+  } else {
+    if (selectedCards.length >= 4) {
+      showToast("You can select at most 4 cards");
+      return;
+    }
+    selectedCards.push(card);
+  }
+
+  playSelectSound();
 
   const cardsRow = document.getElementById("cardsRow");
   const scrollLeft = cardsRow ? cardsRow.scrollLeft : 0;
@@ -1876,6 +2040,7 @@ function renderWinner(room) {
   if (currentRoomCode && !countedFinishedRooms.has(currentRoomCode)) {
     countedFinishedRooms.add(currentRoomCode);
     recordGameStats({ countGame: true, won: isMe }).catch(() => {});
+    playWinSound();
   }
 
   appEl.innerHTML = `
@@ -2021,6 +2186,7 @@ document.addEventListener("click", (event) => {
   if (action === "open-join") navigate("join");
   if (action === "how-to-play") navigate("how");
   if (action === "back-home") navigate("home");
+  if (action === "toggle-sound") toggleSound();
   if (action === "open-profile") navigate("profile");
   if (action === "open-avatar-picker") openAvatarPicker();
   if (action === "change-name") navigate("name");

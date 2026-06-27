@@ -98,7 +98,29 @@ For clean testing, create a new room with this v9 version instead of joining old
 
 - Quick in-game reactions/emotes
 - Scrollable round-by-round game history log
-- Sound effects (card play, bluff call, win/lose)
 - Animated card-to-pile movement when a move is played
 - Rematch button on the winner screen
+
+## Latest fixes in this version (game room polish + gameplay rules)
+
+**Layout**
+- Reduced stacked padding across `.screen` / `.table-panel` / `.hand-panel` so there's no more wasted black space on the sides on mobile.
+- The center pile now shows a compact one-line message when empty instead of reserving a tall, mostly-blank block — this is what was pushing "Your Cards" off-screen.
+- Cards are smaller on phones (56px, down to 50px under 380px width) so multiple rank-groups can sit on the same line instead of each one forcing a new row.
+- Card-selection no longer jumps your scroll position back to the start of your hand every time you tap a card.
+
+**Gameplay rules**
+- You can only ever select/play up to 4 cards in one move (selecting a 5th shows a toast; already-maxed-out cards visually dim so it's clear you're capped).
+- Ranks where all 4 cards have already been revealed (shown face-up after a bluff call) no longer appear as claimable ranks when starting a new set — claiming a fully "dead" rank made no sense since everyone already knows it.
+- **Big one:** if you play your last card(s) and your hand goes to 0, you are *not* declared the winner immediately. The next player still gets a normal turn and can Pass or Call Bluff on your claim, exactly like any other move. You only actually win if:
+  - nobody challenges and the round naturally clears back to you, or
+  - someone challenges, you were genuinely honest, and the challenge fails (in that case you win immediately since your claim was just proven true).
+  
+  If someone calls Bluff and you really were lying, you pick the whole pile back up and keep playing — no more "winning" by sneaking a lie past on your last turn.
+- Selected cards now show a small numbered badge (1–4) so you can see the order you picked them in, and the "X selected" counter shows "X/4" so the cap is always visible.
+
+**Sound**
+- Lightweight sound effects using the Web Audio API (no external files, so they work fully offline): a click for playing cards, a soft tone for selecting/deselecting, a low tone for passing, a dramatic sting when Bluff is called, a result chime for catch/backfire, and a short fanfare when a game is won.
+- A speaker icon in the game header lets you mute/unmute; your preference is remembered (`localStorage`).
+- Sounds for other players' moves play in real time as their actions sync in, not just for your own actions.
 
